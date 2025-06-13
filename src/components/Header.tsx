@@ -37,6 +37,14 @@ export const Header: React.FC<HeaderProps> = ({ user, onMenuClick }) => {
                 day: 'numeric' 
               })}
             </p>
+             <a
+              href="https://bolt.fun"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-xs text-blue-500 hover:underline mt-1 block"
+            >
+              ⚡ Built on Bolt
+            </a>
           </div>
         </div>
 
