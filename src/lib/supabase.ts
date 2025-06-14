@@ -2,18 +2,54 @@ import { createClient } from '@supabase/supabase-js';
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
 const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
+const offlineMode = import.meta.env.VITE_OFFLINE_MODE === 'true';
 
 if (!supabaseUrl || !supabaseKey) {
   throw new Error('Missing Supabase environment variables');
 }
 
+// Create Supabase client with enhanced error handling
 export const supabase = createClient(supabaseUrl, supabaseKey, {
   auth: {
     autoRefreshToken: true,
     persistSession: true,
     detectSessionInUrl: true
+  },
+  global: {
+    fetch: async (url, options = {}) => {
+      try {
+        const response = await fetch(url, {
+          ...options,
+          // Add timeout to prevent hanging requests
+          signal: AbortSignal.timeout(10000) // 10 second timeout
+        });
+        return response;
+      } catch (error) {
+        console.warn('Supabase fetch error:', error);
+        // Return a mock response for offline mode
+        if (offlineMode || error.name === 'AbortError' || error.message.includes('Failed to fetch')) {
+          return new Response(JSON.stringify({ error: 'Offline mode' }), {
+            status: 503,
+            statusText: 'Service Unavailable',
+            headers: { 'Content-Type': 'application/json' }
+          });
+        }
+        throw error;
+      }
+    }
   }
 });
+
+// Helper function to check if Supabase is available
+export const checkSupabaseConnection = async (): Promise<boolean> => {
+  try {
+    const { data, error } = await supabase.from('users').select('count').limit(1);
+    return !error;
+  } catch (error) {
+    console.warn('Supabase connection check failed:', error);
+    return false;
+  }
+};
 
 // Database types
 export interface Todo {

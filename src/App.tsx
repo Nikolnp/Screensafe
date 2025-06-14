@@ -9,9 +9,10 @@ import {
   Wifi,
   WifiOff,
   Camera,
-  FileText
+  FileText,
+  AlertCircle
 } from 'lucide-react';
-import { supabase, Todo, Event, Reminder, Achievement } from './lib/supabase';
+import { supabase, Todo, Event, Reminder, Achievement, checkSupabaseConnection } from './lib/supabase';
 import { hybridStorage } from './lib/storage';
 import { DashboardCard } from './components/DashboardCard';
 import { TodoModal } from './components/TodoModal';
@@ -28,6 +29,8 @@ function App() {
   const [showTodoModal, setShowTodoModal] = useState(false);
   const [showOCRUploader, setShowOCRUploader] = useState(false);
   const [isOnline, setIsOnline] = useState(navigator.onLine);
+  const [supabaseConnected, setSupabaseConnected] = useState(true);
+  const [connectionError, setConnectionError] = useState<string | null>(null);
   
   // Data states
   const [todos, setTodos] = useState<Todo[]>([]);
@@ -42,105 +45,168 @@ function App() {
   const [achievementsLoading, setAchievementsLoading] = useState(false);
 
   useEffect(() => {
-    // Check initial auth state
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setUser(session?.user ?? null);
-      setIsLoading(false);
-    });
-
-    // Listen for auth changes
-    const authListener = supabase.auth.onAuthStateChange(
-      (_event, session) => {
-        setUser(session?.user ?? null);
-      }
-    );
-
-    // Safely extract subscription
-    const subscription = authListener?.data?.subscription;
-
-    // Online/offline detection
-    const handleOnline = () => setIsOnline(true);
-    const handleOffline = () => setIsOnline(false);
-    
-    window.addEventListener('online', handleOnline);
-    window.addEventListener('offline', handleOffline);
-
-    // Register service worker
-    if ('serviceWorker' in navigator) {
-      navigator.serviceWorker.register('/sw.js')
-        .then(registration => {
-          console.log('SW registered: ', registration);
-        })
-        .catch(registrationError => {
-          console.log('SW registration failed: ', registrationError);
-        });
-    }
-
-    return () => {
-      if (subscription) {
-        subscription.unsubscribe();
-      }
-      window.removeEventListener('online', handleOnline);
-      window.removeEventListener('offline', handleOffline);
-    };
+    initializeApp();
   }, []);
 
+  const initializeApp = async () => {
+    try {
+      // Check Supabase connection first
+      const connected = await checkSupabaseConnection();
+      setSupabaseConnected(connected);
+      
+      if (!connected) {
+        setConnectionError('Unable to connect to database. Running in offline mode.');
+        // Load data from local storage
+        await loadOfflineData();
+        setIsLoading(false);
+        return;
+      }
+
+      // Check initial auth state
+      const { data: { session }, error } = await supabase.auth.getSession();
+      
+      if (error) {
+        console.error('Auth session error:', error);
+        setConnectionError('Authentication service unavailable. Running in offline mode.');
+        await loadOfflineData();
+        setIsLoading(false);
+        return;
+      }
+
+      setUser(session?.user ?? null);
+      setConnectionError(null);
+      
+      // Listen for auth changes
+      const authListener = supabase.auth.onAuthStateChange(
+        (_event, session) => {
+          setUser(session?.user ?? null);
+        }
+      );
+
+      // Safely extract subscription
+      const subscription = authListener?.data?.subscription;
+
+      // Online/offline detection
+      const handleOnline = () => {
+        setIsOnline(true);
+        // Retry Supabase connection when coming back online
+        checkSupabaseConnection().then(setSupabaseConnected);
+      };
+      const handleOffline = () => setIsOnline(false);
+      
+      window.addEventListener('online', handleOnline);
+      window.addEventListener('offline', handleOffline);
+
+      // Register service worker
+      if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.register('/sw.js')
+          .then(registration => {
+            console.log('SW registered: ', registration);
+          })
+          .catch(registrationError => {
+            console.log('SW registration failed: ', registrationError);
+          });
+      }
+
+      // Cleanup function
+      const cleanup = () => {
+        if (subscription) {
+          subscription.unsubscribe();
+        }
+        window.removeEventListener('online', handleOnline);
+        window.removeEventListener('offline', handleOffline);
+      };
+
+      // Store cleanup function for later use
+      (window as any).__appCleanup = cleanup;
+
+    } catch (error) {
+      console.error('App initialization error:', error);
+      setConnectionError('Failed to initialize app. Running in offline mode.');
+      await loadOfflineData();
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const loadOfflineData = async () => {
+    try {
+      const [localTodos, localEvents, localReminders, localAchievements] = await Promise.all([
+        hybridStorage.retrieve('todos'),
+        hybridStorage.retrieve('events'),
+        hybridStorage.retrieve('reminders'),
+        hybridStorage.retrieve('achievements')
+      ]);
+
+      if (localTodos) setTodos(localTodos);
+      if (localEvents) setEvents(localEvents);
+      if (localReminders) setReminders(localReminders);
+      if (localAchievements) setAchievements(localAchievements);
+    } catch (error) {
+      console.error('Error loading offline data:', error);
+    }
+  };
+
   useEffect(() => {
-    if (user) {
+    if (user && supabaseConnected) {
       fetchAllData();
       setupRealtimeSubscriptions();
     }
-  }, [user]);
+  }, [user, supabaseConnected]);
 
   const setupRealtimeSubscriptions = () => {
-    if (!user) return;
+    if (!user || !supabaseConnected) return;
 
-    // Subscribe to todos changes
-    const todosSubscription = supabase
-      .channel('todos_changes')
-      .on('postgres_changes', 
-        { event: '*', schema: 'public', table: 'todos', filter: `user_id=eq.${user.id}` },
-        () => fetchTodos()
-      )
-      .subscribe();
+    try {
+      // Subscribe to todos changes
+      const todosSubscription = supabase
+        .channel('todos_changes')
+        .on('postgres_changes', 
+          { event: '*', schema: 'public', table: 'todos', filter: `user_id=eq.${user.id}` },
+          () => fetchTodos()
+        )
+        .subscribe();
 
-    // Subscribe to events changes
-    const eventsSubscription = supabase
-      .channel('events_changes')
-      .on('postgres_changes',
-        { event: '*', schema: 'public', table: 'events', filter: `user_id=eq.${user.id}` },
-        () => fetchEvents()
-      )
-      .subscribe();
+      // Subscribe to events changes
+      const eventsSubscription = supabase
+        .channel('events_changes')
+        .on('postgres_changes',
+          { event: '*', schema: 'public', table: 'events', filter: `user_id=eq.${user.id}` },
+          () => fetchEvents()
+        )
+        .subscribe();
 
-    // Subscribe to reminders changes
-    const remindersSubscription = supabase
-      .channel('reminders_changes')
-      .on('postgres_changes',
-        { event: '*', schema: 'public', table: 'reminders', filter: `user_id=eq.${user.id}` },
-        () => fetchReminders()
-      )
-      .subscribe();
+      // Subscribe to reminders changes
+      const remindersSubscription = supabase
+        .channel('reminders_changes')
+        .on('postgres_changes',
+          { event: '*', schema: 'public', table: 'reminders', filter: `user_id=eq.${user.id}` },
+          () => fetchReminders()
+        )
+        .subscribe();
 
-    // Subscribe to achievements changes
-    const achievementsSubscription = supabase
-      .channel('achievements_changes')
-      .on('postgres_changes',
-        { event: '*', schema: 'public', table: 'achievements', filter: `user_id=eq.${user.id}` },
-        () => fetchAchievements()
-      )
-      .subscribe();
+      // Subscribe to achievements changes
+      const achievementsSubscription = supabase
+        .channel('achievements_changes')
+        .on('postgres_changes',
+          { event: '*', schema: 'public', table: 'achievements', filter: `user_id=eq.${user.id}` },
+          () => fetchAchievements()
+        )
+        .subscribe();
 
-    return () => {
-      todosSubscription.unsubscribe();
-      eventsSubscription.unsubscribe();
-      remindersSubscription.unsubscribe();
-      achievementsSubscription.unsubscribe();
-    };
+      return () => {
+        todosSubscription.unsubscribe();
+        eventsSubscription.unsubscribe();
+        remindersSubscription.unsubscribe();
+        achievementsSubscription.unsubscribe();
+      };
+    } catch (error) {
+      console.error('Error setting up realtime subscriptions:', error);
+    }
   };
 
   const fetchAllData = async () => {
-    if (!user) return;
+    if (!user || !supabaseConnected) return;
     await Promise.all([
       fetchTodos(),
       fetchEvents(),
@@ -150,7 +216,7 @@ function App() {
   };
 
   const fetchTodos = async () => {
-    if (!user) return;
+    if (!user || !supabaseConnected) return;
     
     setTodosLoading(true);
     try {
@@ -176,7 +242,7 @@ function App() {
   };
 
   const fetchEvents = async () => {
-    if (!user) return;
+    if (!user || !supabaseConnected) return;
     
     setEventsLoading(true);
     try {
@@ -200,7 +266,7 @@ function App() {
   };
 
   const fetchReminders = async () => {
-    if (!user) return;
+    if (!user || !supabaseConnected) return;
     
     setRemindersLoading(true);
     try {
@@ -225,7 +291,7 @@ function App() {
   };
 
   const fetchAchievements = async () => {
-    if (!user) return;
+    if (!user || !supabaseConnected) return;
     
     setAchievementsLoading(true);
     try {
@@ -250,16 +316,31 @@ function App() {
   };
 
   const handleSignOut = async () => {
-    await supabase.auth.signOut();
+    try {
+      if (supabaseConnected) {
+        await supabase.auth.signOut();
+      } else {
+        // Clear local user state in offline mode
+        setUser(null);
+      }
+    } catch (error) {
+      console.error('Sign out error:', error);
+      // Force sign out locally
+      setUser(null);
+    }
   };
 
   const handleTodoSave = () => {
-    fetchTodos(); // Refresh todos after save
+    if (supabaseConnected) {
+      fetchTodos(); // Refresh todos after save
+    }
   };
 
   const handleOCRSuccess = (result: CategorizedContent) => {
     // Refresh all data after OCR processing
-    fetchAllData();
+    if (supabaseConnected) {
+      fetchAllData();
+    }
     
     // Show success notification
     console.log('OCR processing completed:', result);
@@ -276,7 +357,7 @@ function App() {
     );
   }
 
-  if (!user) {
+  if (!user && !connectionError) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-indigo-50 via-purple-50 to-pink-50 flex items-center justify-center p-4">
         <div className="text-center max-w-md">
@@ -313,8 +394,8 @@ function App() {
     <div className="min-h-screen bg-gradient-to-br from-indigo-50 via-purple-50 to-pink-50">
       <Header user={user} onMenuClick={() => {}} />
       
-      {/* Connection status indicator */}
-      <div className="px-4 py-2">
+      {/* Connection status indicators */}
+      <div className="px-4 py-2 space-y-2">
         <div className={`inline-flex items-center px-3 py-1 rounded-full text-xs font-medium ${
           isOnline 
             ? 'bg-green-100 text-green-800' 
@@ -323,6 +404,13 @@ function App() {
           {isOnline ? <Wifi className="w-3 h-3 mr-1" /> : <WifiOff className="w-3 h-3 mr-1" />}
           {isOnline ? 'Online' : 'Offline'}
         </div>
+        
+        {connectionError && (
+          <div className="bg-yellow-100 border border-yellow-300 text-yellow-800 px-3 py-2 rounded-lg text-sm flex items-center space-x-2">
+            <AlertCircle className="w-4 h-4 flex-shrink-0" />
+            <span>{connectionError}</span>
+          </div>
+        )}
       </div>
 
       <main className="px-4 pb-20">
@@ -382,10 +470,15 @@ function App() {
           </div>
           <button
             onClick={() => setShowOCRUploader(true)}
-            className="bg-white/20 backdrop-blur-sm text-white px-6 py-3 rounded-xl hover:bg-white/30 transition-all duration-200 transform hover:scale-105 font-medium flex items-center space-x-2"
+            disabled={!supabaseConnected}
+            className={`px-6 py-3 rounded-xl font-medium flex items-center space-x-2 transition-all duration-200 transform hover:scale-105 ${
+              supabaseConnected 
+                ? 'bg-white/20 backdrop-blur-sm text-white hover:bg-white/30' 
+                : 'bg-gray-400/50 text-gray-200 cursor-not-allowed'
+            }`}
           >
             <FileText className="w-5 h-5" />
-            <span>Upload Screenshot</span>
+            <span>{supabaseConnected ? 'Upload Screenshot' : 'Offline Mode'}</span>
           </button>
         </div>
 
@@ -413,7 +506,12 @@ function App() {
 
             <button 
               onClick={() => setShowOCRUploader(true)}
-              className="flex items-center space-x-2 bg-white/80 backdrop-blur-sm border border-white/20 px-4 py-3 rounded-xl hover:bg-white/90 transition-all whitespace-nowrap"
+              disabled={!supabaseConnected}
+              className={`flex items-center space-x-2 border border-white/20 px-4 py-3 rounded-xl transition-all whitespace-nowrap ${
+                supabaseConnected 
+                  ? 'bg-white/80 backdrop-blur-sm hover:bg-white/90' 
+                  : 'bg-gray-200/50 text-gray-400 cursor-not-allowed'
+              }`}
             >
               <Camera className="w-4 h-4" />
               <span>Scan Image</span>
