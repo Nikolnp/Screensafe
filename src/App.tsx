@@ -150,60 +150,8 @@ function App() {
   useEffect(() => {
     if (user && supabaseConnected) {
       fetchAllData();
-      setupRealtimeSubscriptions();
     }
   }, [user, supabaseConnected]);
-
-  const setupRealtimeSubscriptions = () => {
-    if (!user || !supabaseConnected) return;
-
-    try {
-      // Subscribe to todos changes
-      const todosSubscription = supabase
-        .channel('todos_changes')
-        .on('postgres_changes', 
-          { event: '*', schema: 'public', table: 'todos', filter: `user_id=eq.${user.id}` },
-          () => fetchTodos()
-        )
-        .subscribe();
-
-      // Subscribe to events changes
-      const eventsSubscription = supabase
-        .channel('events_changes')
-        .on('postgres_changes',
-          { event: '*', schema: 'public', table: 'events', filter: `user_id=eq.${user.id}` },
-          () => fetchEvents()
-        )
-        .subscribe();
-
-      // Subscribe to reminders changes
-      const remindersSubscription = supabase
-        .channel('reminders_changes')
-        .on('postgres_changes',
-          { event: '*', schema: 'public', table: 'reminders', filter: `user_id=eq.${user.id}` },
-          () => fetchReminders()
-        )
-        .subscribe();
-
-      // Subscribe to achievements changes
-      const achievementsSubscription = supabase
-        .channel('achievements_changes')
-        .on('postgres_changes',
-          { event: '*', schema: 'public', table: 'achievements', filter: `user_id=eq.${user.id}` },
-          () => fetchAchievements()
-        )
-        .subscribe();
-
-      return () => {
-        todosSubscription.unsubscribe();
-        eventsSubscription.unsubscribe();
-        remindersSubscription.unsubscribe();
-        achievementsSubscription.unsubscribe();
-      };
-    } catch (error) {
-      console.error('Error setting up realtime subscriptions:', error);
-    }
-  };
 
   const fetchAllData = async () => {
     if (!user || !supabaseConnected) return;

@@ -31,11 +31,20 @@ export interface OCRBlock {
 class OCRService {
   private worker: Tesseract.Worker | null = null;
   private isInitialized = false;
+  private initializationPromise: Promise<void> | null = null;
 
   async initialize(): Promise<void> {
     if (this.isInitialized) return;
+    if (this.initializationPromise) return this.initializationPromise;
 
+    this.initializationPromise = this.doInitialize();
+    return this.initializationPromise;
+  }
+
+  private async doInitialize(): Promise<void> {
     try {
+      console.log('Initializing OCR worker...');
+      
       this.worker = await createWorker('eng', OEM.LSTM_ONLY, {
         logger: (m) => {
           if (m.status === 'recognizing text') {
@@ -53,20 +62,29 @@ class OCRService {
       console.log('OCR Worker initialized successfully');
     } catch (error) {
       console.error('Failed to initialize OCR worker:', error);
+      this.initializationPromise = null;
       throw error;
     }
   }
 
   async extractText(imageFile: File | string): Promise<OCRResult> {
-    if (!this.worker) {
-      await this.initialize();
-    }
-
     const startTime = Date.now();
 
     try {
-      const { data } = await this.worker!.recognize(imageFile);
+      console.log('Starting OCR extraction...');
+      
+      // Initialize worker if needed
+      await this.initialize();
+      
+      if (!this.worker) {
+        throw new Error('OCR worker not initialized');
+      }
+
+      console.log('Processing image with OCR...');
+      const { data } = await this.worker.recognize(imageFile);
       const processingTime = Date.now() - startTime;
+
+      console.log('OCR extraction completed in', processingTime, 'ms');
 
       // Extract blocks with bounding boxes
       const blocks: OCRBlock[] = data.blocks?.map(block => ({
@@ -76,7 +94,7 @@ class OCRService {
         baseline: block.baseline
       })) || [];
 
-      return {
+      const result: OCRResult = {
         text: data.text,
         confidence: data.confidence,
         blocks,
@@ -89,9 +107,17 @@ class OCRService {
           }
         }
       };
+
+      console.log('OCR Result:', {
+        textLength: result.text.length,
+        confidence: result.confidence,
+        blocksCount: result.blocks.length
+      });
+
+      return result;
     } catch (error) {
       console.error('OCR extraction failed:', error);
-      throw error;
+      throw new Error(`OCR processing failed: ${error.message}`);
     }
   }
 
@@ -100,19 +126,22 @@ class OCRService {
       await this.worker.terminate();
       this.worker = null;
       this.isInitialized = false;
+      this.initializationPromise = null;
     }
   }
 
   // Mock OCR result for testing
   getMockOCRResult(): OCRResult {
+    console.log('Using mock OCR data for testing');
+    
     return {
       text: `Meeting with team tomorrow at 2 PM
-      Complete project proposal by Friday
-      Reminder: Doctor appointment next week
-      Achievement unlocked: 10 tasks completed!
-      Buy groceries: milk, bread, eggs
-      Call mom tonight
-      Deadline: Submit report by end of month`,
+Complete project proposal by Friday
+Reminder: Doctor appointment next week
+Achievement unlocked: 10 tasks completed!
+Buy groceries: milk, bread, eggs
+Call mom tonight
+Deadline: Submit report by end of month`,
       confidence: 85.5,
       blocks: [
         {

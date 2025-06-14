@@ -23,6 +23,7 @@ export const OCRUploader: React.FC<OCRUploaderProps> = ({
   const [error, setError] = useState<string>('');
   const [step, setStep] = useState<'upload' | 'processing' | 'results'>('upload');
   const [useMockData, setUseMockData] = useState(false);
+  const [processingStep, setProcessingStep] = useState<string>('');
   
   const fileInputRef = useRef<HTMLInputElement>(null);
   const cameraInputRef = useRef<HTMLInputElement>(null);
@@ -62,35 +63,49 @@ export const OCRUploader: React.FC<OCRUploaderProps> = ({
     setIsProcessing(true);
     setStep('processing');
     setError('');
+    setProcessingStep('Initializing...');
 
     try {
       let ocrData: OCRResult;
       
       if (useMockData) {
+        setProcessingStep('Using mock data...');
         // Use mock data for testing
         ocrData = ocrService.getMockOCRResult();
         // Simulate processing delay
         await new Promise(resolve => setTimeout(resolve, 2000));
       } else {
+        setProcessingStep('Processing image with OCR...');
         // Process actual image
         ocrData = await ocrService.extractText(file!);
       }
 
+      console.log('OCR completed, text extracted:', ocrData.text.substring(0, 100) + '...');
       setOcrResult(ocrData);
 
+      setProcessingStep('Categorizing content...');
       // Categorize the extracted content
       const categorized = contentCategorizer.categorizeContent(ocrData.text, ocrData.confidence);
+      console.log('Content categorized:', {
+        todos: categorized.todos.length,
+        events: categorized.events.length,
+        reminders: categorized.reminders.length,
+        achievements: categorized.achievements.length
+      });
       setCategorizedResult(categorized);
 
+      setProcessingStep('Storing data...');
       // Store in database
       await storeExtractedData(ocrData, categorized);
 
       setStep('results');
     } catch (err) {
       console.error('OCR processing failed:', err);
-      setError('Failed to process image. Please try again.');
+      setError(`Failed to process image: ${err.message || 'Unknown error'}`);
+      setStep('upload');
     } finally {
       setIsProcessing(false);
+      setProcessingStep('');
     }
   };
 
@@ -107,28 +122,30 @@ export const OCRUploader: React.FC<OCRUploaderProps> = ({
           .from('screenshots')
           .upload(fileName, file);
 
-        if (uploadError) throw uploadError;
+        if (uploadError) {
+          console.warn('File upload failed, continuing without file storage:', uploadError);
+        } else {
+          const { data: { publicUrl } } = supabase.storage
+            .from('screenshots')
+            .getPublicUrl(fileName);
+          
+          fileUrl = publicUrl;
 
-        const { data: { publicUrl } } = supabase.storage
-          .from('screenshots')
-          .getPublicUrl(fileName);
-        
-        fileUrl = publicUrl;
-
-        // Store media metadata
-        await supabase.from('media_storage').insert({
-          user_id: user.id,
-          file_name: file.name,
-          file_type: file.type,
-          file_size: file.size,
-          storage_path: fileName,
-          public_url: fileUrl,
-          metadata: {
-            width: ocrData.metadata.imageSize.width,
-            height: ocrData.metadata.imageSize.height,
-            processingTime: ocrData.metadata.processingTime
-          }
-        });
+          // Store media metadata
+          await supabase.from('media_storage').insert({
+            user_id: user.id,
+            file_name: file.name,
+            file_type: file.type,
+            file_size: file.size,
+            storage_path: fileName,
+            public_url: fileUrl,
+            metadata: {
+              width: ocrData.metadata.imageSize.width,
+              height: ocrData.metadata.imageSize.height,
+              processingTime: ocrData.metadata.processingTime
+            }
+          });
+        }
       }
 
       // Store extracted data
@@ -155,70 +172,79 @@ export const OCRUploader: React.FC<OCRUploaderProps> = ({
 
     } catch (error) {
       console.error('Error storing extracted data:', error);
-      throw error;
+      // Don't throw error here, as the processing was successful
+      console.warn('Data storage failed, but OCR processing completed successfully');
     }
   };
 
   const storeCategorizedItems = async (categorized: CategorizedContent, userId: string) => {
-    // Store todos
-    if (categorized.todos.length > 0) {
-      const todos = categorized.todos.map(todo => ({
-        user_id: userId,
-        title: todo.title,
-        description: todo.description,
-        priority: todo.priority,
-        status: todo.status,
-        due_date: todo.due_date,
-        tags: todo.tags
-      }));
+    try {
+      // Store todos
+      if (categorized.todos.length > 0) {
+        const todos = categorized.todos.map(todo => ({
+          user_id: userId,
+          title: todo.title,
+          description: todo.description,
+          priority: todo.priority,
+          status: todo.status,
+          due_date: todo.due_date,
+          tags: todo.tags
+        }));
 
-      await supabase.from('todos').insert(todos);
-    }
+        const { error: todosError } = await supabase.from('todos').insert(todos);
+        if (todosError) console.error('Error storing todos:', todosError);
+      }
 
-    // Store events
-    if (categorized.events.length > 0) {
-      const events = categorized.events.map(event => ({
-        user_id: userId,
-        title: event.title,
-        description: event.description,
-        start_time: event.start_time,
-        end_time: event.end_time,
-        location: event.location,
-        event_type: event.event_type,
-        color: event.color,
-        is_all_day: event.is_all_day
-      }));
+      // Store events
+      if (categorized.events.length > 0) {
+        const events = categorized.events.map(event => ({
+          user_id: userId,
+          title: event.title,
+          description: event.description,
+          start_time: event.start_time,
+          end_time: event.end_time,
+          location: event.location,
+          event_type: event.event_type,
+          color: event.color,
+          is_all_day: event.is_all_day
+        }));
 
-      await supabase.from('events').insert(events);
-    }
+        const { error: eventsError } = await supabase.from('events').insert(events);
+        if (eventsError) console.error('Error storing events:', eventsError);
+      }
 
-    // Store reminders
-    if (categorized.reminders.length > 0) {
-      const reminders = categorized.reminders.map(reminder => ({
-        user_id: userId,
-        title: reminder.title,
-        message: reminder.message,
-        remind_at: reminder.remind_at,
-        is_recurring: reminder.is_recurring,
-        recurrence_pattern: reminder.recurrence_pattern,
-        priority: reminder.priority
-      }));
+      // Store reminders
+      if (categorized.reminders.length > 0) {
+        const reminders = categorized.reminders.map(reminder => ({
+          user_id: userId,
+          title: reminder.title,
+          message: reminder.message,
+          remind_at: reminder.remind_at,
+          is_recurring: reminder.is_recurring,
+          recurrence_pattern: reminder.recurrence_pattern,
+          priority: reminder.priority
+        }));
 
-      await supabase.from('reminders').insert(reminders);
-    }
+        const { error: remindersError } = await supabase.from('reminders').insert(reminders);
+        if (remindersError) console.error('Error storing reminders:', remindersError);
+      }
 
-    // Store achievements
-    if (categorized.achievements.length > 0) {
-      const achievements = categorized.achievements.map(achievement => ({
-        user_id: userId,
-        title: achievement.title,
-        description: achievement.description,
-        icon: achievement.icon,
-        category: achievement.category,
-        points: achievement.points
-      }));
+      // Store achievements
+      if (categorized.achievements.length > 0) {
+        const achievements = categorized.achievements.map(achievement => ({
+          user_id: userId,
+          title: achievement.title,
+          description: achievement.description,
+          icon: achievement.icon,
+          category: achievement.category,
+          points: achievement.points
+        }));
 
-      await supabase.from('achievements').insert(achievements);
+        const { error: achievementsError } = await supabase.from('achievements').insert(achievements);
+        if (achievementsError) console.error('Error storing achievements:', achievementsError);
+      }
+    } catch (error) {
+      console.error('Error storing categorized items:', error);
     }
   };
 
@@ -238,6 +264,7 @@ export const OCRUploader: React.FC<OCRUploaderProps> = ({
     setError('');
     setStep('upload');
     setUseMockData(false);
+    setProcessingStep('');
   };
 
   const handleClose = () => {
@@ -381,9 +408,12 @@ export const OCRUploader: React.FC<OCRUploaderProps> = ({
               <h3 className="text-lg font-semibold text-gray-900 mb-2">
                 Processing Image...
               </h3>
-              <p className="text-gray-600">
-                Extracting text and categorizing content
+              <p className="text-gray-600 mb-2">
+                {processingStep || 'Extracting text and categorizing content'}
               </p>
+              <div className="text-sm text-gray-500">
+                This may take a few moments
+              </div>
             </div>
           )}
 
