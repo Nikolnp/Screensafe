@@ -49,11 +49,14 @@ function App() {
     });
 
     // Listen for auth changes
-    const { data: { subscription } } = supabase.auth.onAuthStateChange(
+    const authListener = supabase.auth.onAuthStateChange(
       (_event, session) => {
         setUser(session?.user ?? null);
       }
     );
+
+    // Safely extract subscription
+    const subscription = authListener?.data?.subscription;
 
     // Online/offline detection
     const handleOnline = () => setIsOnline(true);
@@ -74,7 +77,9 @@ function App() {
     }
 
     return () => {
-      subscription.unsubscribe();
+      if (subscription) {
+        subscription.unsubscribe();
+      }
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
     };
