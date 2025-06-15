@@ -3,16 +3,18 @@ import {
   CheckSquare, 
   Calendar, 
   Bell, 
-  Trophy, 
   Plus,
   LogOut,
   Wifi,
   WifiOff,
   Camera,
   FileText,
-  AlertCircle
+  AlertCircle,
+  Brain,
+  Settings
 } from 'lucide-react';
-import { supabase, Todo, Event, Reminder, Achievement, checkSupabaseConnection } from './lib/supabase';
+import { supabase, Todo, Event, Reminder, checkSupabaseConnection } from './lib/supabase';
+import { geminiService } from './lib/gemini';
 import { hybridStorage } from './lib/storage';
 import { DashboardCard } from './components/DashboardCard';
 import { TodoModal } from './components/TodoModal';
@@ -20,7 +22,7 @@ import { Header } from './components/Header';
 import { AuthModal } from './components/AuthModal';
 import { PWAInstaller } from './components/PWAInstaller';
 import { OCRUploader } from './components/OCRUploader';
-import { CategorizedContent } from './lib/categorizer';
+import { GeminiConfig } from './components/GeminiConfig';
 
 function App() {
   const [user, setUser] = useState<any>(null);
@@ -28,6 +30,7 @@ function App() {
   const [showAuthModal, setShowAuthModal] = useState(false);
   const [showTodoModal, setShowTodoModal] = useState(false);
   const [showOCRUploader, setShowOCRUploader] = useState(false);
+  const [showGeminiConfig, setShowGeminiConfig] = useState(false);
   const [isOnline, setIsOnline] = useState(navigator.onLine);
   const [supabaseConnected, setSupabaseConnected] = useState(true);
   const [connectionError, setConnectionError] = useState<string | null>(null);
@@ -36,13 +39,11 @@ function App() {
   const [todos, setTodos] = useState<Todo[]>([]);
   const [events, setEvents] = useState<Event[]>([]);
   const [reminders, setReminders] = useState<Reminder[]>([]);
-  const [achievements, setAchievements] = useState<Achievement[]>([]);
 
   // Loading states
   const [todosLoading, setTodosLoading] = useState(false);
   const [eventsLoading, setEventsLoading] = useState(false);
   const [remindersLoading, setRemindersLoading] = useState(false);
-  const [achievementsLoading, setAchievementsLoading] = useState(false);
 
   useEffect(() => {
     initializeApp();
@@ -56,7 +57,6 @@ function App() {
       
       if (!connected) {
         setConnectionError('Unable to connect to database. Running in offline mode.');
-        // Load data from local storage
         await loadOfflineData();
         setIsLoading(false);
         return;
@@ -83,13 +83,9 @@ function App() {
         }
       );
 
-      // Safely extract subscription
-      const subscription = authListener?.data?.subscription;
-
       // Online/offline detection
       const handleOnline = () => {
         setIsOnline(true);
-        // Retry Supabase connection when coming back online
         checkSupabaseConnection().then(setSupabaseConnected);
       };
       const handleOffline = () => setIsOnline(false);
@@ -108,18 +104,6 @@ function App() {
           });
       }
 
-      // Cleanup function
-      const cleanup = () => {
-        if (subscription) {
-          subscription.unsubscribe();
-        }
-        window.removeEventListener('online', handleOnline);
-        window.removeEventListener('offline', handleOffline);
-      };
-
-      // Store cleanup function for later use
-      (window as any).__appCleanup = cleanup;
-
     } catch (error) {
       console.error('App initialization error:', error);
       setConnectionError('Failed to initialize app. Running in offline mode.');
@@ -131,17 +115,15 @@ function App() {
 
   const loadOfflineData = async () => {
     try {
-      const [localTodos, localEvents, localReminders, localAchievements] = await Promise.all([
+      const [localTodos, localEvents, localReminders] = await Promise.all([
         hybridStorage.retrieve('todos'),
         hybridStorage.retrieve('events'),
-        hybridStorage.retrieve('reminders'),
-        hybridStorage.retrieve('achievements')
+        hybridStorage.retrieve('reminders')
       ]);
 
       if (localTodos) setTodos(localTodos);
       if (localEvents) setEvents(localEvents);
       if (localReminders) setReminders(localReminders);
-      if (localAchievements) setAchievements(localAchievements);
     } catch (error) {
       console.error('Error loading offline data:', error);
     }
@@ -158,8 +140,7 @@ function App() {
     await Promise.all([
       fetchTodos(),
       fetchEvents(),
-      fetchReminders(),
-      fetchAchievements()
+      fetchReminders()
     ]);
   };
 
@@ -177,11 +158,9 @@ function App() {
       if (todosError) throw todosError;
       setTodos(todosData || []);
       
-      // Store in hybrid storage
       await hybridStorage.store('todos', todosData || []);
     } catch (error) {
       console.error('Error fetching todos:', error);
-      // Fallback to local storage
       const localTodos = await hybridStorage.retrieve('todos');
       if (localTodos) setTodos(localTodos);
     } finally {
@@ -238,59 +217,29 @@ function App() {
     }
   };
 
-  const fetchAchievements = async () => {
-    if (!user || !supabaseConnected) return;
-    
-    setAchievementsLoading(true);
-    try {
-      const { data: achievementsData, error: achievementsError } = await supabase
-        .from('achievements')
-        .select('*')
-        .eq('user_id', user.id)
-        .eq('is_unlocked', true)
-        .order('unlocked_at', { ascending: false });
-      
-      if (achievementsError) throw achievementsError;
-      setAchievements(achievementsData || []);
-      
-      await hybridStorage.store('achievements', achievementsData || []);
-    } catch (error) {
-      console.error('Error fetching achievements:', error);
-      const localAchievements = await hybridStorage.retrieve('achievements');
-      if (localAchievements) setAchievements(localAchievements);
-    } finally {
-      setAchievementsLoading(false);
-    }
-  };
-
   const handleSignOut = async () => {
     try {
       if (supabaseConnected) {
         await supabase.auth.signOut();
       } else {
-        // Clear local user state in offline mode
         setUser(null);
       }
     } catch (error) {
       console.error('Sign out error:', error);
-      // Force sign out locally
       setUser(null);
     }
   };
 
   const handleTodoSave = () => {
     if (supabaseConnected) {
-      fetchTodos(); // Refresh todos after save
+      fetchTodos();
     }
   };
 
-  const handleOCRSuccess = (result: CategorizedContent) => {
-    // Refresh all data after OCR processing
+  const handleOCRSuccess = (result: any) => {
     if (supabaseConnected) {
       fetchAllData();
     }
-    
-    // Show success notification
     console.log('OCR processing completed:', result);
   };
 
@@ -310,14 +259,14 @@ function App() {
       <div className="min-h-screen bg-gradient-to-br from-indigo-50 via-purple-50 to-pink-50 flex items-center justify-center p-4">
         <div className="text-center max-w-md">
           <div className="w-20 h-20 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-2xl flex items-center justify-center mx-auto mb-8">
-            <Trophy className="w-10 h-10 text-white" />
+            <Brain className="w-10 h-10 text-white" />
           </div>
           
           <h1 className="text-4xl font-bold text-gray-900 mb-4">
-            Dashboard PWA
+            AI Screenshot Analyzer
           </h1>
           <p className="text-gray-600 mb-8">
-            Your beautiful, mobile-optimized productivity dashboard. Manage todos, events, reminders, and track achievements with AI-powered screenshot analysis.
+            Transform your screenshots into actionable tasks with AI-powered analysis. Extract todos, events, and reminders automatically with intelligent insights.
           </p>
           
           <button
@@ -344,13 +293,27 @@ function App() {
       
       {/* Connection status indicators */}
       <div className="px-4 py-2 space-y-2">
-        <div className={`inline-flex items-center px-3 py-1 rounded-full text-xs font-medium ${
-          isOnline 
-            ? 'bg-green-100 text-green-800' 
-            : 'bg-red-100 text-red-800'
-        }`}>
-          {isOnline ? <Wifi className="w-3 h-3 mr-1" /> : <WifiOff className="w-3 h-3 mr-1" />}
-          {isOnline ? 'Online' : 'Offline'}
+        <div className="flex items-center justify-between">
+          <div className={`inline-flex items-center px-3 py-1 rounded-full text-xs font-medium ${
+            isOnline 
+              ? 'bg-green-100 text-green-800' 
+              : 'bg-red-100 text-red-800'
+          }`}>
+            {isOnline ? <Wifi className="w-3 h-3 mr-1" /> : <WifiOff className="w-3 h-3 mr-1" />}
+            {isOnline ? 'Online' : 'Offline'}
+          </div>
+
+          <button
+            onClick={() => setShowGeminiConfig(true)}
+            className={`inline-flex items-center px-3 py-1 rounded-full text-xs font-medium transition-colors ${
+              geminiService.isConfigured()
+                ? 'bg-purple-100 text-purple-800 hover:bg-purple-200'
+                : 'bg-yellow-100 text-yellow-800 hover:bg-yellow-200'
+            }`}
+          >
+            <Brain className="w-3 h-3 mr-1" />
+            {geminiService.isConfigured() ? 'AI Ready' : 'Configure AI'}
+          </button>
         </div>
         
         {connectionError && (
@@ -363,7 +326,7 @@ function App() {
 
       <main className="px-4 pb-20">
         {/* Dashboard Cards */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-8">
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-8">
           <DashboardCard
             title="To-dos"
             count={todos.filter(todo => todo.status !== 'completed').length}
@@ -393,41 +356,55 @@ function App() {
             subtitle="Active"
             isLoading={remindersLoading}
           />
-          
-          <DashboardCard
-            title="Achievements"
-            count={achievements.length}
-            icon={Trophy}
-            color="green"
-            onClick={() => {}}
-            subtitle="Unlocked"
-            isLoading={achievementsLoading}
-          />
         </div>
 
-        {/* OCR Feature Highlight */}
-        <div className="mb-8 bg-gradient-to-r from-indigo-500 to-purple-600 rounded-2xl p-6 text-white">
-          <div className="flex items-center justify-between">
-            <div>
-              <h2 className="text-xl font-bold mb-2">Smart Screenshot Analysis</h2>
-              <p className="text-indigo-100 mb-4">
-                Upload screenshots to automatically extract todos, events, reminders, and achievements
-              </p>
+        {/* AI Screenshot Analysis Feature */}
+        <div className="mb-8 bg-gradient-to-r from-indigo-500 via-purple-600 to-pink-600 rounded-2xl p-6 text-white relative overflow-hidden">
+          <div className="absolute inset-0 bg-black/10 rounded-2xl"></div>
+          <div className="relative z-10">
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center space-x-3">
+                <div className="w-12 h-12 bg-white/20 backdrop-blur-sm rounded-xl flex items-center justify-center">
+                  <Brain className="w-6 h-6 text-white" />
+                </div>
+                <div>
+                  <h2 className="text-xl font-bold">AI-Powered Screenshot Analysis</h2>
+                  <p className="text-indigo-100">
+                    Transform screenshots into actionable tasks with intelligent insights
+                  </p>
+                </div>
+              </div>
+              <Camera className="w-12 h-12 text-indigo-200" />
             </div>
-            <Camera className="w-12 h-12 text-indigo-200" />
+            
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+              <div className="bg-white/10 backdrop-blur-sm rounded-lg p-3">
+                <h3 className="font-semibold text-sm mb-1">Smart Extraction</h3>
+                <p className="text-xs text-indigo-100">OCR + AI analysis for accurate text recognition</p>
+              </div>
+              <div className="bg-white/10 backdrop-blur-sm rounded-lg p-3">
+                <h3 className="font-semibold text-sm mb-1">Auto Categorization</h3>
+                <p className="text-xs text-indigo-100">Intelligent sorting into todos, events, reminders</p>
+              </div>
+              <div className="bg-white/10 backdrop-blur-sm rounded-lg p-3">
+                <h3 className="font-semibold text-sm mb-1">Export & Share</h3>
+                <p className="text-xs text-indigo-100">Multiple formats: PDF, CSV, JSON, HTML</p>
+              </div>
+            </div>
+
+            <button
+              onClick={() => setShowOCRUploader(true)}
+              disabled={!supabaseConnected}
+              className={`px-6 py-3 rounded-xl font-medium flex items-center space-x-2 transition-all duration-200 transform hover:scale-105 ${
+                supabaseConnected 
+                  ? 'bg-white/20 backdrop-blur-sm text-white hover:bg-white/30' 
+                  : 'bg-gray-400/50 text-gray-200 cursor-not-allowed'
+              }`}
+            >
+              <FileText className="w-5 h-5" />
+              <span>{supabaseConnected ? 'Analyze Screenshot' : 'Offline Mode'}</span>
+            </button>
           </div>
-          <button
-            onClick={() => setShowOCRUploader(true)}
-            disabled={!supabaseConnected}
-            className={`px-6 py-3 rounded-xl font-medium flex items-center space-x-2 transition-all duration-200 transform hover:scale-105 ${
-              supabaseConnected 
-                ? 'bg-white/20 backdrop-blur-sm text-white hover:bg-white/30' 
-                : 'bg-gray-400/50 text-gray-200 cursor-not-allowed'
-            }`}
-          >
-            <FileText className="w-5 h-5" />
-            <span>{supabaseConnected ? 'Upload Screenshot' : 'Offline Mode'}</span>
-          </button>
         </div>
 
         {/* Quick Actions */}
@@ -462,7 +439,15 @@ function App() {
               }`}
             >
               <Camera className="w-4 h-4" />
-              <span>Scan Image</span>
+              <span>AI Analysis</span>
+            </button>
+
+            <button 
+              onClick={() => setShowGeminiConfig(true)}
+              className="flex items-center space-x-2 bg-white/80 backdrop-blur-sm border border-white/20 px-4 py-3 rounded-xl hover:bg-white/90 transition-all whitespace-nowrap"
+            >
+              <Settings className="w-4 h-4" />
+              <span>AI Settings</span>
             </button>
           </div>
         </div>
@@ -565,6 +550,12 @@ function App() {
         isOpen={showOCRUploader}
         onClose={() => setShowOCRUploader(false)}
         onSuccess={handleOCRSuccess}
+      />
+
+      <GeminiConfig
+        isOpen={showGeminiConfig}
+        onClose={() => setShowGeminiConfig(false)}
+        onConfigured={() => setShowGeminiConfig(false)}
       />
       
       <PWAInstaller />
